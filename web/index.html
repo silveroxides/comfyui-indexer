@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ComfyUI Indexer</title>
+    <meta name="description" content="Search and browse your ComfyUI-generated images by metadata">
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header__brand">
+                <svg class="header__logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2"/>
+                    <circle cx="8.5" cy="8.5" r="1.5"/>
+                    <path d="M21 15l-5-5L5 21"/>
+                </svg>
+                <h1 class="header__title">ComfyUI Indexer</h1>
+            </div>
+            
+            <div class="search-box">
+                <div class="search-box__input-wrapper">
+                    <svg class="search-box__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"/>
+                        <path d="M21 21l-4.35-4.35"/>
+                    </svg>
+                    <input 
+                        type="text" 
+                        id="search-input" 
+                        class="search-box__input" 
+                        placeholder="Search prompts, models, metadata..."
+                        autocomplete="off"
+                    >
+                    <button id="search-clear" class="search-box__clear" style="display: none;" title="Clear search">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M18 6L6 18M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
+                
+                <div class="search-box__controls">
+                    <select id="search-mode" class="search-box__select" title="Search mode">
+                        <option value="fts">Full Text</option>
+                        <option value="fuzzy">Fuzzy</option>
+                        <option value="regex">Regex</option>
+                        <option value="exact">Exact</option>
+                    </select>
+                    
+                    <select id="search-category" class="search-box__select" title="Category filter">
+                        <option value="">All Categories</option>
+                        <option value="prompt">Prompts</option>
+                        <option value="model">Models</option>
+                        <option value="value">Values</option>
+                        <option value="parameter">Parameters</option>
+                        <option value="node_type">Node Types</option>
+                    </select>
+                    
+                    <button id="search-btn" class="search-box__button">
+                        Search
+                    </button>
+                </div>
+            </div>
+            
+            <div class="header__actions">
+                <button id="stats-btn" class="header__btn" title="View Statistics">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 20V10M12 20V4M6 20v-6"/>
+                    </svg>
+                </button>
+                <button id="scan-btn" class="header__btn" title="Scan Directory">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 12a9 9 0 11-6.219-8.56"/>
+                        <polyline points="21,3 21,9 15,9"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+        
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Tabs -->
+            <div class="tabs">
+                <button class="tabs__tab tabs__tab--active" data-tab="gallery">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7"/>
+                        <rect x="14" y="3" width="7" height="7"/>
+                        <rect x="3" y="14" width="7" height="7"/>
+                        <rect x="14" y="14" width="7" height="7"/>
+                    </svg>
+                    Gallery
+                </button>
+                <button class="tabs__tab" data-tab="results">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="8" y1="6" x2="21" y2="6"/>
+                        <line x1="8" y1="12" x2="21" y2="12"/>
+                        <line x1="8" y1="18" x2="21" y2="18"/>
+                        <line x1="3" y1="6" x2="3.01" y2="6"/>
+                        <line x1="3" y1="12" x2="3.01" y2="12"/>
+                        <line x1="3" y1="18" x2="3.01" y2="18"/>
+                    </svg>
+                    Search Results
+                    <span id="results-count" class="tabs__badge" style="display: none;">0</span>
+                </button>
+            </div>
+            
+            <!-- Gallery View -->
+            <div id="gallery-view" class="view view--active">
+                <div id="gallery" class="gallery">
+                    <!-- Images will be loaded here -->
+                </div>
+                
+                <div id="gallery-loading" class="loading" style="display: none;">
+                    <div class="loading__spinner"></div>
+                    <p>Loading images...</p>
+                </div>
+                
+                <div id="gallery-empty" class="empty-state" style="display: none;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <rect x="3" y="3" width="18" height="18" rx="2"/>
+                        <circle cx="8.5" cy="8.5" r="1.5"/>
+                        <path d="M21 15l-5-5L5 21"/>
+                    </svg>
+                    <h3>No Images Indexed</h3>
+                    <p>Scan a directory to start indexing your ComfyUI images.</p>
+                    <button id="empty-scan-btn" class="btn btn--primary">Scan Directory</button>
+                </div>
+                
+                <div id="load-more" class="load-more" style="display: none;">
+                    <button id="load-more-btn" class="btn btn--secondary">Load More</button>
+                </div>
+            </div>
+            
+            <!-- Search Results View -->
+            <div id="results-view" class="view">
+                <div id="search-info" class="search-info" style="display: none;">
+                    <span id="search-query"></span>
+                    <span id="search-time"></span>
+                </div>
+                
+                <div id="results" class="results">
+                    <!-- Search results will be loaded here -->
+                </div>
+                
+                <div id="results-loading" class="loading" style="display: none;">
+                    <div class="loading__spinner"></div>
+                    <p>Searching...</p>
+                </div>
+                
+                <div id="results-empty" class="empty-state">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <circle cx="11" cy="11" r="8"/>
+                        <path d="M21 21l-4.35-4.35"/>
+                    </svg>
+                    <h3>Ready to Search</h3>
+                    <p>Enter a search query above to find images by prompts, models, or metadata.</p>
+                </div>
+            </div>
+        </main>
+        
+        <!-- Lightbox -->
+        <div id="lightbox" class="lightbox">
+            <button id="lightbox-close" class="lightbox__close" title="Close (Esc)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+            </button>
+            
+            <button id="lightbox-prev" class="lightbox__nav lightbox__nav--prev" title="Previous (←)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="15,18 9,12 15,6"/>
+                </svg>
+            </button>
+            
+            <button id="lightbox-next" class="lightbox__nav lightbox__nav--next" title="Next (→)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="9,6 15,12 9,18"/>
+                </svg>
+            </button>
+            
+            <div class="lightbox__content">
+                <div class="lightbox__image-container">
+                    <img id="lightbox-image" class="lightbox__image" src="" alt="">
+                </div>
+                
+                <div class="lightbox__sidebar">
+                    <div class="lightbox__header">
+                        <h2 id="lightbox-title" class="lightbox__title">Image Details</h2>
+                        <button id="lightbox-toggle-meta" class="lightbox__toggle" title="Toggle metadata">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M4 6h16M4 12h16M4 18h7"/>
+                            </svg>
+                        </button>
+                    </div>
+                    
+                    <div id="lightbox-metadata" class="lightbox__metadata">
+                        <!-- Metadata will be loaded here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Stats Modal -->
+        <div id="stats-modal" class="modal">
+            <div class="modal__content">
+                <div class="modal__header">
+                    <h2>Index Statistics</h2>
+                    <button id="stats-close" class="modal__close">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M18 6L6 18M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="stats-content" class="modal__body">
+                    <!-- Stats will be loaded here -->
+                </div>
+            </div>
+        </div>
+        
+        <!-- Scan Modal -->
+        <div id="scan-modal" class="modal">
+            <div class="modal__content">
+                <div class="modal__header">
+                    <h2>Scan Directory</h2>
+                    <button id="scan-close" class="modal__close">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M18 6L6 18M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal__body">
+                    <div class="form-group">
+                        <label for="scan-directory">Directory Path</label>
+                        <input type="text" id="scan-directory" class="form-input" placeholder="C:\path\to\images">
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="scan-recursive" checked>
+                            <span>Scan subdirectories</span>
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="scan-force">
+                            <span>Force re-index unchanged files</span>
+                        </label>
+                    </div>
+                    <div id="scan-progress" class="scan-progress" style="display: none;">
+                        <div class="loading__spinner"></div>
+                        <p id="scan-status">Scanning...</p>
+                    </div>
+                    <div id="scan-results" style="display: none;"></div>
+                </div>
+                <div class="modal__footer">
+                    <button id="scan-cancel" class="btn btn--secondary">Cancel</button>
+                    <button id="scan-start" class="btn btn--primary">Start Scan</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="js/app.js"></script>
+</body>
+</html>

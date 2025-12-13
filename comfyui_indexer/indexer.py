@@ -102,6 +102,7 @@ class Indexer:
             """)
             
             # Create FTS5 virtual table for full-text search
+            # Using detail='none' to reduce index size (no position data needed)
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS metadata_fts USING fts5(
                     key,
@@ -110,7 +111,8 @@ class Indexer:
                     node_type,
                     content='metadata',
                     content_rowid='id',
-                    tokenize='unicode61'
+                    tokenize='unicode61',
+                    detail='none'
                 )
             """)
             
@@ -305,42 +307,56 @@ class Indexer:
         image_id: int, 
         metadata: ExtractedMetadata
     ) -> None:
-        """Insert metadata entries for an image."""
+        """Insert metadata entries for an image.
         
+        Only indexes high-value categories: prompts, models, parameters, node_types.
+        Skips 'all_values' to avoid database bloat from widget data.
+        """
         entries = []
+        seen_values = set()  # Deduplicate entries
         
-        # Add prompts
+        # Add prompts (only if text is meaningful - min 10 chars)
         for item in metadata.prompts:
-            entries.append((
-                image_id, 'prompt', item['key'], item['value'],
-                item.get('node_type'), item.get('node_id')
-            ))
+            value = item.get('value', '')
+            if len(value) >= 10:
+                key = (item['key'], value)
+                if key not in seen_values:
+                    seen_values.add(key)
+                    entries.append((
+                        image_id, 'prompt', item['key'], value,
+                        item.get('node_type'), item.get('node_id')
+                    ))
         
-        # Add models
+        # Add models (deduplicated by value)
+        seen_models = set()
         for item in metadata.models:
-            entries.append((
-                image_id, 'model', item['key'], item['value'],
-                item.get('node_type'), item.get('node_id')
-            ))
+            value = item.get('value', '')
+            if value and value not in seen_models:
+                seen_models.add(value)
+                entries.append((
+                    image_id, 'model', item['key'], value,
+                    item.get('node_type'), item.get('node_id')
+                ))
         
-        # Add all values for full-text search
-        for item in metadata.all_values:
-            entries.append((
-                image_id, 'value', item['key'], item['value'],
-                item.get('node_type'), item.get('node_id')
-            ))
+        # NOTE: Skipping all_values category - this was the main source of bloat
+        # (67% of all metadata rows were widget_* values nobody searches for)
         
-        # Add parameters
+        # Add parameters (only meaningful ones)
         for key, value in metadata.parameters.items():
-            entries.append((
-                image_id, 'parameter', key, str(value), None, None
-            ))
+            str_value = str(value)
+            if len(str_value) >= 1:  # Keep all parameters, they're already filtered
+                entries.append((
+                    image_id, 'parameter', key, str_value, None, None
+                ))
         
-        # Add node types
+        # Add node types (deduplicated - one entry per unique type)
+        seen_nodes = set()
         for node_type in metadata.node_types:
-            entries.append((
-                image_id, 'node_type', 'class_type', node_type, node_type, None
-            ))
+            if node_type and node_type not in seen_nodes:
+                seen_nodes.add(node_type)
+                entries.append((
+                    image_id, 'node_type', 'class_type', node_type, node_type, None
+                ))
         
         if entries:
             conn.executemany("""

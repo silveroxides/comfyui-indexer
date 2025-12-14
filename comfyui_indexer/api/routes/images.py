@@ -27,12 +27,57 @@ def get_indexer() -> Indexer:
     return get_app_indexer()
 
 
+@router.get("/directories")
+async def get_directories(
+    indexer: Indexer = Depends(get_indexer),
+) -> dict:
+    """
+    Get list of unique directories containing indexed images.
+    
+    Returns directories grouped by root path with image counts.
+    """
+    from contextlib import closing
+    import sqlite3
+    
+    directories = {}
+    
+    try:
+        with closing(sqlite3.connect(indexer.db_path)) as conn:
+            # Get all file paths
+            rows = conn.execute("SELECT file_path FROM images").fetchall()
+            
+            for (file_path,) in rows:
+                # Extract parent directory
+                path = Path(file_path)
+                parent = str(path.parent)
+                
+                if parent in directories:
+                    directories[parent] += 1
+                else:
+                    directories[parent] = 1
+        
+        # Sort by count descending
+        sorted_dirs = sorted(directories.items(), key=lambda x: (-x[1], x[0]))
+        
+        return {
+            "directories": [
+                {"path": path, "count": count}
+                for path, count in sorted_dirs
+            ],
+            "total": len(sorted_dirs)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("", response_model=PaginatedImages)
 async def list_images(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     order_by: str = "indexed_at",
     descending: bool = True,
+    directory: str = None,
     indexer: Indexer = Depends(get_indexer),
 ) -> PaginatedImages:
     """
@@ -40,20 +85,39 @@ async def list_images(
     
     - **limit**: Maximum number of images to return (1-200)
     - **offset**: Offset for pagination
-    - **order_by**: Field to order by (id, file_path, created_at, indexed_at, file_size)
+    - **order_by**: Field to order by (id, file_path, created_at, modified_at, indexed_at, file_size)
     - **descending**: Sort in descending order
+    - **directory**: Filter to images in this directory (exact match on parent path)
     """
     images = indexer.list_images(
         limit=limit,
         offset=offset,
         order_by=order_by,
-        descending=descending
+        descending=descending,
+        directory=directory
     )
     
-    stats = indexer.get_stats()
+    # Get total count (with directory filter if specified)
+    if directory:
+        from contextlib import closing
+        import sqlite3
+        with closing(sqlite3.connect(indexer.db_path)) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM images WHERE file_path LIKE ?",
+                (directory.replace('\\', '/') + '/%',)
+            ).fetchone()[0]
+            # Also try backslash version for Windows paths
+            count2 = conn.execute(
+                "SELECT COUNT(*) FROM images WHERE file_path LIKE ?",
+                (directory.replace('/', '\\') + '\\%',)
+            ).fetchone()[0]
+            total = max(count, count2) if count != count2 else count
+    else:
+        stats = indexer.get_stats()
+        total = stats.total_images
     
     return PaginatedImages(
-        total=stats.total_images,
+        total=total,
         limit=limit,
         offset=offset,
         images=[

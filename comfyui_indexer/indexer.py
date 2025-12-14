@@ -309,8 +309,9 @@ class Indexer:
     ) -> None:
         """Insert metadata entries for an image.
         
-        Only indexes high-value categories: prompts, models, parameters, node_types.
-        Skips 'all_values' to avoid database bloat from widget data.
+        Only indexes high-value categories: prompts, models, parameters.
+        Skips 'all_values' and 'node_types' to avoid database bloat.
+        Node types can still be searched via raw_workflow JSON if needed.
         """
         entries = []
         seen_values = set()  # Deduplicate entries
@@ -338,8 +339,9 @@ class Indexer:
                     item.get('node_type'), item.get('node_id')
                 ))
         
-        # NOTE: Skipping all_values category - this was the main source of bloat
-        # (67% of all metadata rows were widget_* values nobody searches for)
+        # NOTE: Skipping all_values category - was 67% of bloat
+        # NOTE: Skipping node_types - was 68% of remaining bloat (1.46M rows for 18K images)
+        # Node types can still be searched via raw_workflow JSON column if needed
         
         # Add parameters (only meaningful ones)
         for key, value in metadata.parameters.items():
@@ -347,15 +349,6 @@ class Indexer:
             if len(str_value) >= 1:  # Keep all parameters, they're already filtered
                 entries.append((
                     image_id, 'parameter', key, str_value, None, None
-                ))
-        
-        # Add node types (deduplicated - one entry per unique type)
-        seen_nodes = set()
-        for node_type in metadata.node_types:
-            if node_type and node_type not in seen_nodes:
-                seen_nodes.add(node_type)
-                entries.append((
-                    image_id, 'node_type', 'class_type', node_type, node_type, None
                 ))
         
         if entries:
@@ -568,10 +561,18 @@ class Indexer:
         limit: int = 100,
         offset: int = 0,
         order_by: str = 'indexed_at',
-        descending: bool = True
+        descending: bool = True,
+        directory: str = None
     ) -> list[IndexedImage]:
-        """List indexed images with pagination."""
+        """List indexed images with pagination.
         
+        Args:
+            limit: Maximum number of images to return
+            offset: Skip this many images
+            order_by: Column to sort by
+            descending: Sort in descending order
+            directory: Filter to images in this directory path
+        """
         valid_columns = {'id', 'file_path', 'created_at', 'modified_at', 'indexed_at', 'file_size'}
         if order_by not in valid_columns:
             order_by = 'indexed_at'
@@ -579,11 +580,22 @@ class Indexer:
         direction = 'DESC' if descending else 'ASC'
         
         with self._get_connection() as conn:
-            rows = conn.execute(f"""
-                SELECT * FROM images
-                ORDER BY {order_by} {direction}
-                LIMIT ? OFFSET ?
-            """, (limit, offset)).fetchall()
+            if directory:
+                # Filter by directory - try both path separators
+                dir_fwd = directory.replace('\\', '/') + '/'
+                dir_back = directory.replace('/', '\\') + '\\'
+                rows = conn.execute(f"""
+                    SELECT * FROM images
+                    WHERE file_path LIKE ? OR file_path LIKE ?
+                    ORDER BY {order_by} {direction}
+                    LIMIT ? OFFSET ?
+                """, (dir_fwd + '%', dir_back + '%', limit, offset)).fetchall()
+            else:
+                rows = conn.execute(f"""
+                    SELECT * FROM images
+                    ORDER BY {order_by} {direction}
+                    LIMIT ? OFFSET ?
+                """, (limit, offset)).fetchall()
             
             return [
                 IndexedImage(
@@ -601,3 +613,4 @@ class Indexer:
                 )
                 for row in rows
             ]
+

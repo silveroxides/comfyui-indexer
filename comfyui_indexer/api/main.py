@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..indexer import Indexer
 from ..search import SearchEngine
-from .routes import images, index, search
+from .routes import images, index, search, db
 
 # Global instances (initialized on startup)
 _indexer: Indexer | None = None
@@ -92,6 +92,7 @@ def create_app(
     app.include_router(search.router, prefix="/api")
     app.include_router(images.router, prefix="/api")
     app.include_router(index.router, prefix="/api")
+    app.include_router(db.router, prefix="/api")
     
     # Health check endpoint
     @app.get("/api/health")

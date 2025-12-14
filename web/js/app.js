@@ -37,6 +37,16 @@ const api = {
         return response.json();
     },
 
+    async delete(endpoint) {
+        const response = await fetch(API_BASE + endpoint, {
+            method: 'DELETE'
+        });
+        if (!response.ok) {
+            throw new Error(`API Error: ${response.status}`);
+        }
+        return response.json();
+    },
+
     // Convenience methods
     search(query, options = {}) {
         return this.get('/search', { q: query, ...options });
@@ -84,10 +94,17 @@ const state = {
     galleryImages: [],
     galleryOffset: 0,
     galleryHasMore: true,
+    galleryTotal: 0,
+    galleryLoaded: false,  // Track if gallery has been loaded
+    sortBy: 'indexed_at',
+    sortDesc: true,
+    currentDirectory: '',  // Currently selected directory filter
+    directories: [],       // List of available directories
     searchResults: [],
     currentImageIndex: -1,
     lightboxImages: [],
-    isLoading: false
+    isLoading: false,
+    theme: 'dark'          // Current theme: 'dark' or 'light'
 };
 
 // ========================================
@@ -112,8 +129,15 @@ const elements = {
     gallery: document.getElementById('gallery'),
     galleryLoading: document.getElementById('gallery-loading'),
     galleryEmpty: document.getElementById('gallery-empty'),
+    galleryWelcome: document.getElementById('gallery-welcome'),
+    galleryControls: document.getElementById('gallery-controls'),
+    gallerySort: document.getElementById('gallery-sort'),
+    galleryDirectory: document.getElementById('gallery-directory'),
+    galleryCount: document.getElementById('gallery-count'),
     loadMore: document.getElementById('load-more'),
     loadMoreBtn: document.getElementById('load-more-btn'),
+    browseAllBtn: document.getElementById('browse-all-btn'),
+    welcomeScanBtn: document.getElementById('welcome-scan-btn'),
 
     // Results
     searchInfo: document.getElementById('search-info'),
@@ -152,7 +176,23 @@ const elements = {
     scanResults: document.getElementById('scan-results'),
 
     // Empty state buttons
-    emptyScanBtn: document.getElementById('empty-scan-btn')
+    emptyScanBtn: document.getElementById('empty-scan-btn'),
+
+    // Theme toggle
+    themeToggle: document.getElementById('theme-toggle'),
+
+    // Database view
+    databaseView: document.getElementById('database-view'),
+    dbStats: document.getElementById('db-stats'),
+    dbCategoryFilter: document.getElementById('db-category-filter'),
+    dbAnalyzeBtn: document.getElementById('db-analyze-btn'),
+    dbFindBloatBtn: document.getElementById('db-find-bloat-btn'),
+    dbAnalysis: document.getElementById('db-analysis'),
+    dbExcludeInput: document.getElementById('db-exclude-input'),
+    dbAddExclusionBtn: document.getElementById('db-add-exclusion-btn'),
+    dbExclusions: document.getElementById('db-exclusions'),
+    dbExportBtn: document.getElementById('db-export-btn'),
+    dbImportInput: document.getElementById('db-import-input')
 };
 
 // ========================================
@@ -166,32 +206,45 @@ async function loadGallery(reset = false) {
         state.galleryImages = [];
         state.galleryOffset = 0;
         state.galleryHasMore = true;
+        state.galleryTotal = 0;
         elements.gallery.innerHTML = '';
     }
 
     if (!state.galleryHasMore) return;
 
     state.isLoading = true;
+    state.galleryLoaded = true;
     elements.galleryLoading.style.display = 'flex';
     elements.galleryEmpty.style.display = 'none';
+    elements.galleryWelcome.style.display = 'none';
     elements.loadMore.style.display = 'none';
+    elements.galleryControls.style.display = 'flex';
 
     try {
-        const data = await api.getImages({
+        const params = {
             limit: 50,
             offset: state.galleryOffset,
-            order_by: 'indexed_at',
-            descending: true
-        });
+            order_by: state.sortBy,
+            descending: state.sortDesc
+        };
+
+        if (state.currentDirectory) {
+            params.directory = state.currentDirectory;
+        }
+
+        const data = await api.getImages(params);
 
         if (data.images.length === 0 && state.galleryImages.length === 0) {
             elements.galleryEmpty.style.display = 'flex';
+            elements.galleryControls.style.display = 'none';
         } else {
             state.galleryImages.push(...data.images);
             state.galleryOffset += data.images.length;
+            state.galleryTotal = data.total;
             state.galleryHasMore = state.galleryOffset < data.total;
 
             renderGalleryItems(data.images);
+            updateGalleryCount();
 
             if (state.galleryHasMore) {
                 elements.loadMore.style.display = 'flex';
@@ -476,6 +529,13 @@ function switchTab(tabName) {
 
     elements.galleryView.classList.toggle('view--active', tabName === 'gallery');
     elements.resultsView.classList.toggle('view--active', tabName === 'results');
+    elements.databaseView?.classList.toggle('view--active', tabName === 'database');
+
+    // Load database data when switching to that tab
+    if (tabName === 'database') {
+        loadDbStats();
+        loadExclusions();
+    }
 }
 
 // ========================================
@@ -607,6 +667,247 @@ function showError(message) {
     console.error(message);
 }
 
+function updateGalleryCount() {
+    if (elements.galleryCount) {
+        elements.galleryCount.textContent = `${state.galleryImages.length} of ${state.galleryTotal.toLocaleString()}`;
+    }
+}
+
+async function loadDirectories() {
+    try {
+        const data = await api.get('/images/directories');
+        state.directories = data.directories || [];
+
+        // Update directory dropdown
+        if (elements.galleryDirectory) {
+            elements.galleryDirectory.innerHTML = '<option value="">All Directories</option>';
+            state.directories.forEach(dir => {
+                const option = document.createElement('option');
+                option.value = dir.path;
+                // Show shortened path + count
+                const shortPath = dir.path.length > 50 ? '...' + dir.path.slice(-47) : dir.path;
+                option.textContent = `${shortPath} (${dir.count})`;
+                elements.galleryDirectory.appendChild(option);
+            });
+        }
+    } catch (error) {
+        console.error('Failed to load directories:', error);
+    }
+}
+
+function handleSortChange() {
+    const value = elements.gallerySort.value;
+    const [field, direction] = value.split('-');
+    state.sortBy = field;
+    state.sortDesc = direction === 'desc';
+    loadGallery(true);
+}
+
+function handleDirectoryChange() {
+    state.currentDirectory = elements.galleryDirectory.value;
+    loadGallery(true);
+}
+
+// ========================================
+// Database Analysis Functions
+// ========================================
+
+async function loadDbStats() {
+    try {
+        const data = await api.get('/db/stats');
+
+        elements.dbStats.innerHTML = `
+            <div class="db-stat-card">
+                <div class="db-stat-card__value">${data.total_images.toLocaleString()}</div>
+                <div class="db-stat-card__label">Images</div>
+            </div>
+            <div class="db-stat-card">
+                <div class="db-stat-card__value">${data.total_metadata.toLocaleString()}</div>
+                <div class="db-stat-card__label">Metadata Rows</div>
+            </div>
+            <div class="db-stat-card">
+                <div class="db-stat-card__value">${data.rows_per_image.toFixed(1)}</div>
+                <div class="db-stat-card__label">Rows/Image</div>
+            </div>
+            <div class="db-stat-card">
+                <div class="db-stat-card__value">${data.database_size}</div>
+                <div class="db-stat-card__label">DB Size</div>
+            </div>
+        `;
+
+        if (data.categories.length > 0) {
+            const catTable = `
+                <table class="db-table db-category-table">
+                    <thead>
+                        <tr><th>Category</th><th>Count</th><th>%</th><th>Unique Keys</th><th>Unique Values</th></tr>
+                    </thead>
+                    <tbody>
+                        ${data.categories.map(c => `
+                            <tr>
+                                <td>${c.category}</td>
+                                <td class="count">${c.count.toLocaleString()}</td>
+                                <td>${c.percentage.toFixed(1)}%</td>
+                                <td>${c.unique_keys}</td>
+                                <td>${c.unique_values.toLocaleString()}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+            elements.dbStats.innerHTML += catTable;
+        }
+    } catch (error) {
+        elements.dbStats.innerHTML = `<p class="db-hint">Failed to load stats: ${error.message}</p>`;
+    }
+}
+
+async function analyzeKeys() {
+    const category = elements.dbCategoryFilter.value || null;
+
+    try {
+        const keys = await api.get(`/db/analyze?limit=50${category ? `&category=${category}` : ''}`);
+
+        if (keys.length === 0) {
+            elements.dbAnalysis.innerHTML = '<p class="db-hint">No data found.</p>';
+            return;
+        }
+
+        elements.dbAnalysis.innerHTML = `
+            <table class="db-table">
+                <thead>
+                    <tr><th>#</th><th>Key</th><th>Category</th><th>Count</th><th>Unique</th><th>Avg Len</th><th>Action</th></tr>
+                </thead>
+                <tbody>
+                    ${keys.map((k, i) => `
+                        <tr>
+                            <td>${i + 1}</td>
+                            <td>${k.key}</td>
+                            <td>${k.category}</td>
+                            <td class="count">${k.count.toLocaleString()}</td>
+                            <td>${k.unique_values}</td>
+                            <td>${k.avg_value_length.toFixed(0)}</td>
+                            <td><button class="btn-exclude" data-key="${k.key}">Exclude</button></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+
+        // Add click handlers for exclude buttons
+        elements.dbAnalysis.querySelectorAll('.btn-exclude').forEach(btn => {
+            btn.addEventListener('click', () => addExclusion(btn.dataset.key));
+        });
+    } catch (error) {
+        elements.dbAnalysis.innerHTML = `<p class="db-hint">Error: ${error.message}</p>`;
+    }
+}
+
+async function findBloat() {
+    try {
+        const bloat = await api.get('/db/bloat?threshold=0.3');
+
+        if (bloat.length === 0) {
+            elements.dbAnalysis.innerHTML = '<p class="db-hint">No obvious bloat patterns found. Great!</p>';
+            return;
+        }
+
+        elements.dbAnalysis.innerHTML = `
+            <p class="db-hint">⚠️ Found ${bloat.length} potential bloat candidates:</p>
+            <table class="db-table">
+                <thead>
+                    <tr><th>Key</th><th>Category</th><th>Count</th><th>Unique</th><th>Action</th></tr>
+                </thead>
+                <tbody>
+                    ${bloat.map(k => `
+                        <tr>
+                            <td>${k.key}</td>
+                            <td>${k.category}</td>
+                            <td class="count">${k.count.toLocaleString()}</td>
+                            <td>${k.unique_values}</td>
+                            <td><button class="btn-exclude" data-key="${k.key}">Exclude</button></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+
+        elements.dbAnalysis.querySelectorAll('.btn-exclude').forEach(btn => {
+            btn.addEventListener('click', () => addExclusion(btn.dataset.key));
+        });
+    } catch (error) {
+        elements.dbAnalysis.innerHTML = `<p class="db-hint">Error: ${error.message}</p>`;
+    }
+}
+
+async function loadExclusions() {
+    try {
+        const config = await api.get('/db/config');
+
+        if (config.exclude_keys.length === 0) {
+            elements.dbExclusions.innerHTML = '<p class="db-hint">No exclusions configured.</p>';
+            return;
+        }
+
+        elements.dbExclusions.innerHTML = config.exclude_keys.map(key => `
+            <span class="db-exclusion-tag">
+                ${key}
+                <button class="remove" data-key="${key}">&times;</button>
+            </span>
+        `).join('');
+
+        // Add remove handlers
+        elements.dbExclusions.querySelectorAll('.remove').forEach(btn => {
+            btn.addEventListener('click', () => removeExclusion(btn.dataset.key));
+        });
+    } catch (error) {
+        elements.dbExclusions.innerHTML = '<p class="db-hint">Failed to load exclusions.</p>';
+    }
+}
+
+async function addExclusion(pattern) {
+    try {
+        await api.post('/db/exclude', { pattern });
+        loadExclusions();
+    } catch (error) {
+        console.error('Failed to add exclusion:', error);
+    }
+}
+
+async function removeExclusion(pattern) {
+    try {
+        await api.delete(`/db/exclude/${encodeURIComponent(pattern)}`);
+        loadExclusions();
+    } catch (error) {
+        console.error('Failed to remove exclusion:', error);
+    }
+}
+
+async function exportRules() {
+    try {
+        const data = await api.get('/db/export');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'comfyui-indexer-rules.json';
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        console.error('Failed to export rules:', error);
+    }
+}
+
+async function importRules(file) {
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        await api.post('/db/import?merge=true', data);
+        loadExclusions();
+    } catch (error) {
+        console.error('Failed to import rules:', error);
+    }
+}
+
 // ========================================
 // Event Listeners
 // ========================================
@@ -634,6 +935,46 @@ function initEventListeners() {
     // Gallery
     elements.loadMoreBtn.addEventListener('click', () => loadGallery());
     elements.emptyScanBtn?.addEventListener('click', showScan);
+    elements.browseAllBtn?.addEventListener('click', () => {
+        loadDirectories();
+        loadGallery(true);
+    });
+    elements.welcomeScanBtn?.addEventListener('click', showScan);
+
+    // Gallery controls
+    if (elements.gallerySort) {
+        elements.gallerySort.addEventListener('change', handleSortChange);
+    }
+    if (elements.galleryDirectory) {
+        elements.galleryDirectory.addEventListener('change', handleDirectoryChange);
+    }
+
+    // Database view
+    elements.dbAnalyzeBtn?.addEventListener('click', analyzeKeys);
+    elements.dbFindBloatBtn?.addEventListener('click', findBloat);
+    elements.dbAddExclusionBtn?.addEventListener('click', () => {
+        const pattern = elements.dbExcludeInput.value.trim();
+        if (pattern) {
+            addExclusion(pattern);
+            elements.dbExcludeInput.value = '';
+        }
+    });
+    elements.dbExcludeInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const pattern = elements.dbExcludeInput.value.trim();
+            if (pattern) {
+                addExclusion(pattern);
+                elements.dbExcludeInput.value = '';
+            }
+        }
+    });
+    elements.dbExportBtn?.addEventListener('click', exportRules);
+    elements.dbImportInput?.addEventListener('change', (e) => {
+        if (e.target.files.length > 0) {
+            importRules(e.target.files[0]);
+            e.target.value = ''; // Reset for future imports
+        }
+    });
 
     // Lightbox
     elements.lightboxClose.addEventListener('click', closeLightbox);
@@ -675,10 +1016,69 @@ function initEventListeners() {
 }
 
 // ========================================
+// Theme Toggle
+// ========================================
+
+function toggleTheme() {
+    state.theme = state.theme === 'dark' ? 'light' : 'dark';
+    applyTheme(state.theme);
+    localStorage.setItem('comfyui-indexer-theme', state.theme);
+}
+
+function applyTheme(theme) {
+    state.theme = theme;
+
+    if (theme === 'light') {
+        document.body.classList.add('light-mode');
+    } else {
+        document.body.classList.remove('light-mode');
+    }
+
+    // Update toggle button icons
+    const darkIcon = document.querySelector('.theme-icon-dark');
+    const lightIcon = document.querySelector('.theme-icon-light');
+
+    if (darkIcon && lightIcon) {
+        if (theme === 'light') {
+            darkIcon.style.display = 'none';
+            lightIcon.style.display = 'block';
+        } else {
+            darkIcon.style.display = 'block';
+            lightIcon.style.display = 'none';
+        }
+    }
+}
+
+function initTheme() {
+    // Check localStorage for saved preference
+    const savedTheme = localStorage.getItem('comfyui-indexer-theme');
+
+    if (savedTheme) {
+        applyTheme(savedTheme);
+    } else {
+        // Check system preference
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+            applyTheme('light');
+        }
+    }
+
+    // Add event listener for theme toggle
+    if (elements.themeToggle) {
+        elements.themeToggle.addEventListener('click', toggleTheme);
+    }
+}
+
+// ========================================
 // Initialize
 // ========================================
 
 document.addEventListener('DOMContentLoaded', () => {
     initEventListeners();
-    loadGallery();
+    initTheme();
+    // Don't auto-load gallery - show welcome prompt instead
+    // loadGallery(); 
+    // Pre-load directories for the welcome screen
+    loadDirectories();
 });
+
+

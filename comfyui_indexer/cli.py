@@ -388,5 +388,239 @@ def cleanup(
         console.print("[dim]No missing files found.[/dim]")
 
 
+# ========================================
+# Database Analysis Commands
+# ========================================
+
+db_app = typer.Typer(
+    name="db",
+    help="Database analysis and optimization tools",
+)
+app.add_typer(db_app, name="db")
+
+
+@db_app.command("stats")
+def db_stats(
+    db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path"),
+):
+    """
+    Show detailed database statistics.
+    """
+    from .db_utils import DatabaseAnalyzer, format_bytes
+    
+    db_path = get_db_path(db)
+    analyzer = DatabaseAnalyzer(db_path)
+    stats = analyzer.get_stats()
+    
+    console.print("\n[bold blue]Database Statistics[/bold blue]\n")
+    
+    table = Table(show_header=False, box=None)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    
+    table.add_row("Total images", f"{stats.total_images:,}")
+    table.add_row("Total metadata rows", f"{stats.total_metadata:,}")
+    table.add_row("Rows per image (avg)", f"{stats.rows_per_image:.1f}")
+    table.add_row("Database size", format_bytes(stats.database_size_bytes))
+    
+    console.print(table)
+    
+    if stats.categories:
+        console.print("\n[bold]By Category:[/bold]")
+        cat_table = Table(show_header=True)
+        cat_table.add_column("Category", style="cyan")
+        cat_table.add_column("Count", justify="right")
+        cat_table.add_column("%", justify="right")
+        cat_table.add_column("Unique Keys", justify="right")
+        cat_table.add_column("Unique Values", justify="right")
+        
+        for cat in stats.categories:
+            cat_table.add_row(
+                cat.category,
+                f"{cat.count:,}",
+                f"{cat.percentage:.1f}%",
+                str(cat.unique_keys),
+                f"{cat.unique_values:,}"
+            )
+        
+        console.print(cat_table)
+
+
+@db_app.command("analyze")
+def db_analyze(
+    category: Optional[str] = typer.Option(None, "--category", "-c", help="Category to analyze"),
+    top: int = typer.Option(30, "--top", "-t", help="Number of top keys to show"),
+    db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path"),
+):
+    """
+    Analyze key frequency in the database.
+    """
+    from .db_utils import DatabaseAnalyzer
+    
+    db_path = get_db_path(db)
+    analyzer = DatabaseAnalyzer(db_path)
+    keys = analyzer.get_key_frequency(category=category, limit=top)
+    
+    title = f"Top {top} Keys" + (f" in '{category}'" if category else " (all categories)")
+    console.print(f"\n[bold blue]{title}[/bold blue]\n")
+    
+    table = Table(show_header=True)
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Key", style="cyan")
+    table.add_column("Category", style="yellow")
+    table.add_column("Count", justify="right", style="green")
+    table.add_column("Unique Values", justify="right")
+    table.add_column("Avg Length", justify="right", style="dim")
+    
+    for i, key in enumerate(keys, 1):
+        table.add_row(
+            str(i),
+            key.key,
+            key.category,
+            f"{key.count:,}",
+            str(key.unique_values),
+            f"{key.avg_value_length:.0f}"
+        )
+    
+    console.print(table)
+
+
+@db_app.command("bloat")
+def db_bloat(
+    threshold: float = typer.Option(0.5, "--threshold", "-t", help="Min ratio of images (0.0-1.0)"),
+    db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path"),
+):
+    """
+    Find bloat candidates - keys that appear in many images with low unique value ratio.
+    """
+    from .db_utils import DatabaseAnalyzer
+    
+    db_path = get_db_path(db)
+    analyzer = DatabaseAnalyzer(db_path)
+    bloat = analyzer.find_bloat_candidates(threshold_ratio=threshold)
+    
+    console.print(f"\n[bold blue]Bloat Candidates[/bold blue] (appearing in >{threshold*100:.0f}% of images)\n")
+    
+    if not bloat:
+        console.print("[green]No obvious bloat patterns found.[/green]")
+        return
+    
+    table = Table(show_header=True)
+    table.add_column("Key", style="cyan")
+    table.add_column("Category", style="yellow")
+    table.add_column("Count", justify="right", style="red")
+    table.add_column("Unique Values", justify="right")
+    table.add_column("Status", style="dim")
+    
+    for key in bloat:
+        table.add_row(
+            key.key,
+            key.category,
+            f"{key.count:,}",
+            str(key.unique_values),
+            "⚠️ Candidate for exclusion"
+        )
+    
+    console.print(table)
+    console.print("\n[dim]Use 'comfy-idx db exclude --key <key>' to add to exclusion list.[/dim]")
+
+
+@db_app.command("exclude")
+def db_exclude(
+    key: str = typer.Argument(..., help="Key pattern to exclude (supports glob: widget_*)"),
+):
+    """
+    Add a key pattern to the exclusion list.
+    """
+    from .config import get_config_manager
+    
+    manager = get_config_manager()
+    if manager.add_exclusion(key):
+        console.print(f"[green]✓ Added '{key}' to exclusion list.[/green]")
+    else:
+        console.print(f"[yellow]'{key}' is already in exclusion list.[/yellow]")
+
+
+@db_app.command("include")
+def db_include(
+    key: str = typer.Argument(..., help="Key pattern to remove from exclusion list"),
+):
+    """
+    Remove a key pattern from the exclusion list.
+    """
+    from .config import get_config_manager
+    
+    manager = get_config_manager()
+    if manager.remove_exclusion(key):
+        console.print(f"[green]✓ Removed '{key}' from exclusion list.[/green]")
+    else:
+        console.print(f"[yellow]'{key}' was not in exclusion list.[/yellow]")
+
+
+@db_app.command("exclusions")
+def db_exclusions():
+    """
+    List current exclusion rules.
+    """
+    from .config import get_config_manager
+    
+    manager = get_config_manager()
+    config = manager.config
+    
+    console.print("\n[bold blue]Current Exclusion Rules[/bold blue]\n")
+    console.print(f"[dim]Config file: {manager.config_path}[/dim]\n")
+    
+    if config.exclude_keys:
+        console.print("[cyan]Excluded Keys:[/cyan]")
+        for key in config.exclude_keys:
+            console.print(f"  - {key}")
+    else:
+        console.print("[dim]No key exclusions configured.[/dim]")
+    
+    console.print(f"\n[cyan]Settings:[/cyan]")
+    console.print(f"  Min value length: {config.min_value_length}")
+    console.print(f"  Skip node types: {config.skip_node_types}")
+    console.print(f"  Skip all values: {config.skip_all_values}")
+
+
+@db_app.command("export")
+def db_export(
+    output: str = typer.Argument(..., help="Output file path (JSON)"),
+):
+    """
+    Export exclusion rules to a shareable JSON file.
+    """
+    from .config import get_config_manager
+    
+    manager = get_config_manager()
+    output_path = Path(output)
+    manager.export_rules(output_path)
+    
+    console.print(f"[green]✓ Exported rules to {output_path}[/green]")
+
+
+@db_app.command("import")
+def db_import(
+    input_file: str = typer.Argument(..., help="Input file path (JSON)"),
+    replace: bool = typer.Option(False, "--replace", "-r", help="Replace existing rules instead of merging"),
+):
+    """
+    Import exclusion rules from a JSON file.
+    """
+    from .config import get_config_manager
+    
+    manager = get_config_manager()
+    input_path = Path(input_file)
+    
+    if not input_path.exists():
+        console.print(f"[red]Error: File not found: {input_path}[/red]")
+        raise typer.Exit(1)
+    
+    added = manager.import_rules(input_path, merge=not replace)
+    
+    action = "Replaced with" if replace else "Added"
+    console.print(f"[green]✓ {action} {added} rules from {input_path}[/green]")
+
+
 if __name__ == "__main__":
     app()

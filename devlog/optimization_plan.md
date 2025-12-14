@@ -72,21 +72,20 @@ Skip indexing values shorter than 4 characters (catches "true", "1", "0", etc.)
 
 ## Expected Results
 
-| Metric | Before | After | Reduction |
-|--------|--------|-------|-----------|
-| Rows per image | 321 | ~20-40 | **90%** |
-| Database size | 21.5 GB | ~2-3 GB | **85-90%** |
+| Metric | Original | After v1 | After v2 (Current) |
+|--------|----------|----------|---------------------|
+| Categories indexed | 5 | 4 | 3 (prompt, model, parameter) |
+| Rows per image | 321 | ~114 | **~37** |
+| Database size | 21.5 GB | ~7 GB | **~2-3 GB** |
+
+### What's No Longer Indexed
+
+1. **value** (67% of original) - widget values nobody searches for
+2. **node_type** (68% of remaining) - same 741 types repeated per-image
+
+Node types are still stored in `raw_workflow` JSON column if needed.
 
 ---
-
-## Implementation Checklist
-
-- [x] Modify `indexer.py._insert_metadata()` to skip `all_values` loop
-- [x] Modify `indexer.py._insert_metadata()` to deduplicate prompts/models/nodes
-- [x] Update FTS5 table creation to use `detail='none'`
-- [x] Add minimum length filter (10 chars) for prompts
-- [ ] Add CLI command to rebuild database: `comfy-idx rebuild --optimized`
-- [ ] Document changes in README
 
 ## Migration
 

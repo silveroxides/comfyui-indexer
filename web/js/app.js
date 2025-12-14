@@ -104,7 +104,14 @@ const state = {
     currentImageIndex: -1,
     lightboxImages: [],
     isLoading: false,
-    theme: 'dark'          // Current theme: 'dark' or 'light'
+    theme: 'dark',         // Current theme: 'dark' or 'light'
+
+    // FlexSearch state
+    flexIndex: null,       // FlexSearch Document index
+    indexLoaded: false,    // Whether the search index is loaded
+    indexLoading: false,   // Loading indicator
+    indexDocuments: [],    // Raw documents from index
+    indexHash: null        // Cache hash for invalidation
 };
 
 // ========================================
@@ -217,8 +224,16 @@ async function loadGallery(reset = false) {
     elements.galleryLoading.style.display = 'flex';
     elements.galleryEmpty.style.display = 'none';
     elements.galleryWelcome.style.display = 'none';
-    elements.loadMore.style.display = 'none';
     elements.galleryControls.style.display = 'flex';
+
+    // Update Load More button to show loading state
+    const loadMoreBtn = elements.loadMoreBtn;
+    const originalLoadMoreText = loadMoreBtn ? loadMoreBtn.textContent : '';
+    if (loadMoreBtn && !reset) {
+        loadMoreBtn.textContent = 'Loading...';
+        loadMoreBtn.disabled = true;
+    }
+    elements.loadMore.style.display = 'none';
 
     try {
         const params = {
@@ -256,6 +271,11 @@ async function loadGallery(reset = false) {
     } finally {
         state.isLoading = false;
         elements.galleryLoading.style.display = 'none';
+        // Restore Load More button
+        if (loadMoreBtn) {
+            loadMoreBtn.textContent = originalLoadMoreText || 'Load More';
+            loadMoreBtn.disabled = false;
+        }
     }
 }
 
@@ -303,6 +323,94 @@ function createGalleryItem(image, index) {
 }
 
 // ========================================
+// FlexSearch Index Functions
+// ========================================
+
+async function loadSearchIndex() {
+    if (state.indexLoading || state.indexLoaded) return;
+
+    state.indexLoading = true;
+    console.log('Loading search index...');
+
+    try {
+        // Check index metadata first
+        const metadata = await api.get('/search/index/metadata');
+
+        // If we already have this version cached, skip
+        if (state.indexHash === metadata.hash && state.indexLoaded) {
+            state.indexLoading = false;
+            return;
+        }
+
+        // Fetch the compressed index
+        const response = await fetch(API_BASE + '/search/index?compressed=true');
+        if (!response.ok) throw new Error('Failed to fetch search index');
+
+        // Decompress gzip response
+        const blob = await response.blob();
+        const ds = new DecompressionStream('gzip');
+        const decompressed = blob.stream().pipeThrough(ds);
+        const text = await new Response(decompressed).text();
+        const indexData = JSON.parse(text);
+
+        console.log(`Loaded index with ${indexData.total} documents`);
+
+        // Initialize FlexSearch Document index
+        state.flexIndex = new FlexSearch.Document({
+            document: {
+                id: 'id',
+                index: ['prompts', 'models', 'params'],
+                store: ['id', 'path', 'prompts', 'models', 'params']
+            },
+            tokenize: 'forward',
+            resolution: 9,
+            cache: 100
+        });
+
+        // Add all documents to the index
+        for (const doc of indexData.documents) {
+            state.flexIndex.add(doc);
+        }
+
+        state.indexDocuments = indexData.documents;
+        state.indexHash = metadata.hash;
+        state.indexLoaded = true;
+        state.indexLoading = false;
+
+        console.log('Search index ready!');
+    } catch (error) {
+        console.error('Failed to load search index:', error);
+        state.indexLoading = false;
+        // Fall back to server-side search
+    }
+}
+
+function flexSearch(query, limit = 100) {
+    if (!state.flexIndex) return [];
+
+    // Search across all indexed fields
+    const results = state.flexIndex.search(query, {
+        limit: limit,
+        enrich: true
+    });
+
+    // Merge results from different fields, removing duplicates
+    const seen = new Set();
+    const merged = [];
+
+    for (const fieldResult of results) {
+        for (const item of fieldResult.result) {
+            if (!seen.has(item.id)) {
+                seen.add(item.id);
+                merged.push(item.doc);
+            }
+        }
+    }
+
+    return merged;
+}
+
+// ========================================
 // Search Functions
 // ========================================
 
@@ -313,33 +421,81 @@ async function performSearch() {
     state.isLoading = true;
     switchTab('results');
 
+    // Show loading state on search button
+    const searchBtn = elements.searchBtn;
+    const originalText = searchBtn.textContent;
+    searchBtn.textContent = 'Searching...';
+    searchBtn.disabled = true;
+
     elements.resultsLoading.style.display = 'flex';
     elements.resultsEmpty.style.display = 'none';
     elements.searchInfo.style.display = 'none';
     elements.results.innerHTML = '';
 
+    const startTime = performance.now();
+
     try {
-        const data = await api.search(query, {
-            mode: elements.searchMode.value,
-            category: elements.searchCategory.value || null,
-            limit: 100
-        });
+        let results, mode, totalResults;
 
-        state.searchResults = data.results;
+        // Try client-side FlexSearch first
+        if (state.indexLoaded && state.flexIndex) {
+            const flexResults = flexSearch(query, 100);
 
-        elements.searchQuery.textContent = `"${data.query}" (${data.mode})`;
-        elements.searchTime.textContent = `${data.total_results} results in ${data.search_time_ms.toFixed(1)}ms`;
+            // Convert FlexSearch results to match API format
+            // We need to fetch full image details for each result
+            results = [];
+            for (const doc of flexResults) {
+                try {
+                    const image = await api.getImage(doc.id);
+                    results.push({
+                        image_id: image.id,
+                        file_path: image.file_path,
+                        score: 1.0,
+                        matches: [],
+                        thumbnail_url: `/api/images/${image.id}/thumbnail`,
+                        width: image.width,
+                        height: image.height,
+                        // Extract info from the index
+                        prompt_preview: doc.prompts ? doc.prompts.substring(0, 200) : '',
+                        model_used: doc.models || ''
+                    });
+                } catch (e) {
+                    // Skip images that can't be fetched
+                }
+            }
+
+            mode = 'local';
+            totalResults = results.length;
+        } else {
+            // Fall back to server-side search
+            const data = await api.search(query, {
+                mode: elements.searchMode.value,
+                category: elements.searchCategory.value || null,
+                limit: 100
+            });
+
+            results = data.results;
+            mode = data.mode;
+            totalResults = data.total_results;
+        }
+
+        const searchTime = performance.now() - startTime;
+
+        state.searchResults = results;
+
+        elements.searchQuery.textContent = `"${query}" (${mode})`;
+        elements.searchTime.textContent = `${totalResults} results in ${searchTime.toFixed(1)}ms`;
         elements.searchInfo.style.display = 'flex';
 
-        elements.resultsCount.textContent = data.total_results;
+        elements.resultsCount.textContent = totalResults;
         elements.resultsCount.style.display = 'inline-flex';
 
-        if (data.results.length === 0) {
+        if (results.length === 0) {
             elements.resultsEmpty.querySelector('h3').textContent = 'No Results Found';
             elements.resultsEmpty.querySelector('p').textContent = 'Try a different search query or mode.';
             elements.resultsEmpty.style.display = 'flex';
         } else {
-            renderSearchResults(data.results);
+            renderSearchResults(results);
         }
     } catch (error) {
         console.error('Search failed:', error);
@@ -347,6 +503,8 @@ async function performSearch() {
     } finally {
         state.isLoading = false;
         elements.resultsLoading.style.display = 'none';
+        searchBtn.textContent = originalText;
+        searchBtn.disabled = false;
     }
 }
 
@@ -764,8 +922,18 @@ async function loadDbStats() {
 async function analyzeKeys() {
     const category = elements.dbCategoryFilter.value || null;
 
+    // Show loading state
+    const btn = elements.dbAnalyzeBtn;
+    const originalText = btn.textContent;
+    btn.textContent = 'Analyzing...';
+    btn.disabled = true;
+    elements.dbAnalysis.innerHTML = '<div class="loading"><div class="loading__spinner"></div><p>Analyzing keys...</p></div>';
+
     try {
         const keys = await api.get(`/db/analyze?limit=50${category ? `&category=${category}` : ''}`);
+
+        btn.textContent = originalText;
+        btn.disabled = false;
 
         if (keys.length === 0) {
             elements.dbAnalysis.innerHTML = '<p class="db-hint">No data found.</p>';
@@ -793,21 +961,38 @@ async function analyzeKeys() {
             </table>
         `;
 
-        // Add click handlers for exclude buttons
+        // Add click handlers for exclude buttons with inline feedback
         elements.dbAnalysis.querySelectorAll('.btn-exclude').forEach(btn => {
-            btn.addEventListener('click', () => addExclusion(btn.dataset.key));
+            btn.addEventListener('click', async () => {
+                const key = btn.dataset.key;
+                btn.textContent = '...';
+                btn.disabled = true;
+                await addExclusionInline(key, btn);
+            });
         });
     } catch (error) {
+        btn.textContent = originalText;
+        btn.disabled = false;
         elements.dbAnalysis.innerHTML = `<p class="db-hint">Error: ${error.message}</p>`;
     }
 }
 
 async function findBloat() {
+    // Show loading state
+    const btn = elements.dbFindBloatBtn;
+    const originalText = btn.textContent;
+    btn.textContent = 'Finding...';
+    btn.disabled = true;
+    elements.dbAnalysis.innerHTML = '<div class="loading"><div class="loading__spinner"></div><p>Finding bloat patterns...</p></div>';
+
     try {
         const bloat = await api.get('/db/bloat?threshold=0.3');
 
+        btn.textContent = originalText;
+        btn.disabled = false;
+
         if (bloat.length === 0) {
-            elements.dbAnalysis.innerHTML = '<p class="db-hint">No obvious bloat patterns found. Great!</p>';
+            elements.dbAnalysis.innerHTML = '<p class="db-hint">✓ No obvious bloat patterns found. Great!</p>';
             return;
         }
 
@@ -832,10 +1017,34 @@ async function findBloat() {
         `;
 
         elements.dbAnalysis.querySelectorAll('.btn-exclude').forEach(btn => {
-            btn.addEventListener('click', () => addExclusion(btn.dataset.key));
+            btn.addEventListener('click', async () => {
+                const key = btn.dataset.key;
+                btn.textContent = '...';
+                btn.disabled = true;
+                await addExclusionInline(key, btn);
+            });
         });
     } catch (error) {
+        btn.textContent = originalText;
+        btn.disabled = false;
         elements.dbAnalysis.innerHTML = `<p class="db-hint">Error: ${error.message}</p>`;
+    }
+}
+
+// Helper for inline exclusion with button feedback
+async function addExclusionInline(pattern, buttonEl) {
+    try {
+        await api.post('/db/exclude', { pattern });
+        buttonEl.textContent = '✓';
+        buttonEl.style.background = 'var(--color-success)';
+        buttonEl.style.color = 'white';
+        // Also update the exclusions list
+        loadExclusions();
+    } catch (error) {
+        buttonEl.textContent = '✗';
+        buttonEl.style.background = 'var(--color-error)';
+        buttonEl.disabled = false;
+        console.error('Failed to add exclusion:', error);
     }
 }
 
@@ -865,24 +1074,65 @@ async function loadExclusions() {
 }
 
 async function addExclusion(pattern) {
+    // Show immediate feedback
+    const btn = elements.dbAddExclusionBtn;
+    const originalText = btn.textContent;
+    btn.textContent = 'Adding...';
+    btn.disabled = true;
+
     try {
         await api.post('/db/exclude', { pattern });
-        loadExclusions();
+        await loadExclusions();
+        // Flash success
+        btn.textContent = '✓ Added';
+        btn.style.background = 'var(--color-success)';
+        setTimeout(() => {
+            btn.textContent = originalText;
+            btn.style.background = '';
+            btn.disabled = false;
+        }, 1000);
     } catch (error) {
         console.error('Failed to add exclusion:', error);
+        btn.textContent = 'Failed';
+        btn.style.background = 'var(--color-error)';
+        setTimeout(() => {
+            btn.textContent = originalText;
+            btn.style.background = '';
+            btn.disabled = false;
+        }, 1500);
     }
 }
 
 async function removeExclusion(pattern) {
+    // Show immediate feedback - disable the tag
+    const tags = elements.dbExclusions.querySelectorAll('.db-exclusion-tag');
+    tags.forEach(tag => {
+        if (tag.textContent.includes(pattern)) {
+            tag.style.opacity = '0.5';
+            tag.querySelector('.remove').disabled = true;
+        }
+    });
+
     try {
         await api.delete(`/db/exclude/${encodeURIComponent(pattern)}`);
-        loadExclusions();
+        await loadExclusions();
     } catch (error) {
         console.error('Failed to remove exclusion:', error);
+        // Restore on error
+        tags.forEach(tag => {
+            tag.style.opacity = '1';
+            const btn = tag.querySelector('.remove');
+            if (btn) btn.disabled = false;
+        });
     }
 }
 
 async function exportRules() {
+    const btn = elements.dbExportBtn;
+    const originalText = btn.textContent;
+    btn.textContent = 'Exporting...';
+    btn.disabled = true;
+
     try {
         const data = await api.get('/db/export');
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -892,8 +1142,19 @@ async function exportRules() {
         a.download = 'comfyui-indexer-rules.json';
         a.click();
         URL.revokeObjectURL(url);
+
+        btn.textContent = '✓ Exported';
+        setTimeout(() => {
+            btn.textContent = originalText;
+            btn.disabled = false;
+        }, 1500);
     } catch (error) {
         console.error('Failed to export rules:', error);
+        btn.textContent = 'Failed';
+        setTimeout(() => {
+            btn.textContent = originalText;
+            btn.disabled = false;
+        }, 1500);
     }
 }
 
@@ -935,9 +1196,18 @@ function initEventListeners() {
     // Gallery
     elements.loadMoreBtn.addEventListener('click', () => loadGallery());
     elements.emptyScanBtn?.addEventListener('click', showScan);
-    elements.browseAllBtn?.addEventListener('click', () => {
-        loadDirectories();
-        loadGallery(true);
+    elements.browseAllBtn?.addEventListener('click', async () => {
+        // Show loading state
+        const btn = elements.browseAllBtn;
+        const originalText = btn.textContent;
+        btn.textContent = 'Loading...';
+        btn.disabled = true;
+
+        await loadDirectories();
+        await loadGallery(true);
+
+        btn.textContent = originalText;
+        btn.disabled = false;
     });
     elements.welcomeScanBtn?.addEventListener('click', showScan);
 
@@ -1079,6 +1349,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // loadGallery(); 
     // Pre-load directories for the welcome screen
     loadDirectories();
+    // Pre-load search index in background for instant search
+    loadSearchIndex();
 });
 
 

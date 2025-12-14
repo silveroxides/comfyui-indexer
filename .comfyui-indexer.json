@@ -1,0 +1,9 @@
+{
+  "exclude_keys": [
+    "batch_size"
+  ],
+  "exclude_categories": [],
+  "min_value_length": 4,
+  "skip_node_types": true,
+  "skip_all_values": true
+}

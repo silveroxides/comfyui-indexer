@@ -613,4 +613,110 @@ class Indexer:
                 )
                 for row in rows
             ]
+    
+    def export_search_index(self) -> dict:
+        """
+        Export a compact search index for client-side FlexSearch.
+        
+        Returns a dictionary with:
+        - version: Index format version
+        - generated: Timestamp
+        - total: Total number of documents
+        - documents: List of {id, path, prompts, models, params}
+        """
+        with self._get_connection() as conn:
+            # Get all images with their aggregated metadata
+            images = conn.execute("""
+                SELECT id, file_path FROM images ORDER BY id
+            """).fetchall()
+            
+            documents = []
+            
+            for img in images:
+                image_id = img['id']
+                
+                # Get prompts (concatenated)
+                prompts_row = conn.execute("""
+                    SELECT GROUP_CONCAT(value, ' ') as prompts
+                    FROM metadata 
+                    WHERE image_id = ? AND category = 'prompt'
+                """, (image_id,)).fetchone()
+                
+                # Get models (concatenated)
+                models_row = conn.execute("""
+                    SELECT GROUP_CONCAT(DISTINCT value, ', ') as models
+                    FROM metadata 
+                    WHERE image_id = ? AND category = 'model'
+                """, (image_id,)).fetchone()
+                
+                # Get parameters (key:value pairs)
+                params_rows = conn.execute("""
+                    SELECT key, value
+                    FROM metadata 
+                    WHERE image_id = ? AND category = 'parameter'
+                """, (image_id,)).fetchall()
+                
+                params_str = ' '.join(
+                    f"{p['key']}:{p['value']}" for p in params_rows if p['value']
+                )
+                
+                documents.append({
+                    'id': image_id,
+                    'path': img['file_path'],
+                    'prompts': prompts_row['prompts'] or '' if prompts_row else '',
+                    'models': models_row['models'] or '' if models_row else '',
+                    'params': params_str
+                })
+            
+            return {
+                'version': 1,
+                'generated': datetime.now().isoformat(),
+                'total': len(documents),
+                'documents': documents
+            }
+    
+    def export_search_index_streaming(self) -> Iterator[dict]:
+        """
+        Export search index as a generator for memory efficiency.
+        
+        Yields documents one at a time for streaming responses.
+        """
+        with self._get_connection() as conn:
+            images = conn.execute("""
+                SELECT id, file_path FROM images ORDER BY id
+            """).fetchall()
+            
+            for img in images:
+                image_id = img['id']
+                
+                prompts_row = conn.execute("""
+                    SELECT GROUP_CONCAT(value, ' ') as prompts
+                    FROM metadata 
+                    WHERE image_id = ? AND category = 'prompt'
+                """, (image_id,)).fetchone()
+                
+                models_row = conn.execute("""
+                    SELECT GROUP_CONCAT(DISTINCT value, ', ') as models
+                    FROM metadata 
+                    WHERE image_id = ? AND category = 'model'
+                """, (image_id,)).fetchone()
+                
+                params_rows = conn.execute("""
+                    SELECT key, value
+                    FROM metadata 
+                    WHERE image_id = ? AND category = 'parameter'
+                """, (image_id,)).fetchall()
+                
+                params_str = ' '.join(
+                    f"{p['key']}:{p['value']}" for p in params_rows if p['value']
+                )
+                
+                yield {
+                    'id': image_id,
+                    'path': img['file_path'],
+                    'prompts': prompts_row['prompts'] or '' if prompts_row else '',
+                    'models': models_row['models'] or '' if models_row else '',
+                    'params': params_str
+                }
+
 
